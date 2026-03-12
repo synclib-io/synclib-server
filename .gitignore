@@ -1,0 +1,28 @@
+# The directory Mix will write compiled artifacts to.
+/_build/
+
+# If you run "mix test --cover", coverage assets end up here.
+/cover/
+
+# The directory Mix downloads your dependencies sources to.
+/deps/
+
+# Where third-party dependencies like PHPs wind up.
+/priv/static/
+
+# Dialyzer PLTs
+/priv/plts/
+
+# Generated on crash by the VM
+erl_crash.dump
+
+# Generated on crash by the VM
+*.ez
+
+# Environment variables
+.env
+.env.*
+
+# IDE
+.elixir_ls/
+.vscode/
