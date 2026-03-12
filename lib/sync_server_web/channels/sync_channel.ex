@@ -660,8 +660,9 @@ defmodule SyncServerWeb.SyncChannel do
     end)
   end
 
+  # nil = client didn't specify tables, use channel defaults
+  # []  = client explicitly wants no pull (push-only request)
   defp determine_tables_to_sync(nil, assigns), do: get_tables_for_channel(assigns)
-  defp determine_tables_to_sync([], assigns), do: get_tables_for_channel(assigns)
   defp determine_tables_to_sync(tables, _assigns) when is_list(tables), do: tables
 
   defp stream_sync_data_with_stats(socket, stream_id, tables, table_seqnums, force_refresh_tables, stripped_rows) do
