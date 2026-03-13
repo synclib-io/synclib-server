@@ -366,13 +366,14 @@ defmodule SyncServerWeb.SyncChannel do
     schema_version = params["schema_version"] || 0
     table_seqnums = params["table_seqnums"] || %{}
     tables = params["tables"]
+    role = params["role"]  # "push", "pull", or "bidirectional" (nil = legacy)
     force_refresh_tables = params["force_refresh_tables"] || []
     stripped_rows = params["stripped_rows"] || []
     pending_changes = params["pending_changes"] || []
 
     changes_by_table = Enum.group_by(pending_changes, fn c -> c["table"] end)
 
-    Logger.info("[SYNC:START] client=#{client_id} schema_v=#{schema_version} push=#{length(pending_changes)}")
+    Logger.info("[SYNC:START] client=#{client_id} schema_v=#{schema_version} role=#{role || "legacy"} push=#{length(pending_changes)}")
 
     case @schema_manager.check_client_version(schema_version) do
       {:ok, :upgrade_needed, migrations} ->
@@ -394,6 +395,7 @@ defmodule SyncServerWeb.SyncChannel do
         do_sync(socket, client_id, start_time, changes_by_table, %{
           table_seqnums: table_seqnums,
           tables: tables,
+          role: role,
           force_refresh_tables: force_refresh_tables,
           stripped_rows: stripped_rows,
           pending_changes: pending_changes
@@ -879,10 +881,16 @@ defmodule SyncServerWeb.SyncChannel do
     %{
       table_seqnums: table_seqnums,
       tables: tables,
+      role: role,
       force_refresh_tables: force_refresh_tables,
       stripped_rows: stripped_rows,
       pending_changes: pending_changes
     } = params
+
+    # role: "push" = push-only (skip pull), "pull" = pull-only (skip push),
+    #        "bidirectional" or nil = full sync (legacy behaviour)
+    skip_pull = role == "push"
+    skip_push = role == "pull"
 
     channel_pid = self()
     stream_id = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
@@ -902,38 +910,45 @@ defmodule SyncServerWeb.SyncChannel do
       }
 
       # 1. Process pending changes
-      acks = process_pending_changes(pending_changes, socket)
+      {acks, sync_stats} = if skip_push do
+        {[], sync_stats}
+      else
+        acks = process_pending_changes(pending_changes, socket)
 
-      success_count = Enum.count(acks, fn a -> a.success end)
-      failed_count = length(acks) - success_count
-      push_by_table = changes_by_table
-        |> Enum.map(fn {table, changes} ->
-          table_acks = Enum.filter(acks, fn a ->
-            Enum.any?(changes, fn c -> c["local_seqnum"] == a.local_seqnum end)
+        success_count = Enum.count(acks, fn a -> a.success end)
+        failed_count = length(acks) - success_count
+        push_by_table = changes_by_table
+          |> Enum.map(fn {table, changes} ->
+            table_acks = Enum.filter(acks, fn a ->
+              Enum.any?(changes, fn c -> c["local_seqnum"] == a.local_seqnum end)
+            end)
+            success = Enum.count(table_acks, fn a -> a.success end)
+            {table, %{total: length(changes), success: success, failed: length(changes) - success}}
           end)
-          success = Enum.count(table_acks, fn a -> a.success end)
-          {table, %{total: length(changes), success: success, failed: length(changes) - success}}
-        end)
-        |> Enum.into(%{})
+          |> Enum.into(%{})
 
-      sync_stats = %{sync_stats |
-        push_success: success_count,
-        push_failed: failed_count,
-        push_by_table: push_by_table
-      }
+        {acks, %{sync_stats |
+          push_success: success_count,
+          push_failed: failed_count,
+          push_by_table: push_by_table
+        }}
+      end
 
       if length(acks) > 0 do
         push(socket, "sync_acks", %{stream_id: stream_id, acks: acks})
       end
 
-      # 2. Determine tables
-      tables_to_sync = determine_tables_to_sync(tables, socket.assigns)
+      # 2. Determine tables and stream data
+      {final_seqnums, pull_stats} = if skip_pull do
+        {%{}, %{}}
+      else
+        tables_to_sync = determine_tables_to_sync(tables, socket.assigns)
 
-      # 3. Stream data
-      {final_seqnums, pull_stats} = stream_sync_data_with_stats(
-        socket, stream_id, tables_to_sync, table_seqnums,
-        force_refresh_tables, stripped_rows
-      )
+        stream_sync_data_with_stats(
+          socket, stream_id, tables_to_sync, table_seqnums,
+          force_refresh_tables, stripped_rows
+        )
+      end
 
       sync_stats = %{sync_stats |
         pull_total: Enum.sum(Map.values(pull_stats) |> Enum.map(fn s -> s.rows end)),

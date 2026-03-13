@@ -342,12 +342,16 @@ defmodule SyncServer.Merkle do
 
     max_blocks = max(length(client_block_hashes), length(server_hashes))
 
-    differing = 0..(max_blocks - 1)
-    |> Enum.filter(fn index ->
-      client_hash = Enum.at(client_block_hashes, index)
-      server_hash = Enum.at(server_hashes, index)
-      client_hash != server_hash
-    end)
+    differing = if max_blocks == 0 do
+      []
+    else
+      0..(max_blocks - 1)
+      |> Enum.filter(fn index ->
+        client_hash = Enum.at(client_block_hashes, index)
+        server_hash = Enum.at(server_hashes, index)
+        client_hash != server_hash
+      end)
+    end
 
     {differing, server_hashes}
   end
@@ -368,7 +372,7 @@ defmodule SyncServer.Merkle do
     else
       fields
       |> Enum.reject(fn field ->
-        field in @skip_columns || is_array_field?(schema_module, field)
+        field in @skip_columns
       end)
     end
 
