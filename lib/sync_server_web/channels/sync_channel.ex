@@ -777,35 +777,40 @@ defmodule SyncServerWeb.SyncChannel do
     channel_pid = self()
 
     Task.start(fn ->
-      Enum.each(tables, fn table ->
-        table_seqnum = if table_seqnums, do: table_seqnums[table], else: nil
-        assigns_with_params = socket.assigns
-          |> Map.put(:since_seqnum, table_seqnum)
-          |> Map.put(:order_by, order_by)
-          |> Map.put(:order_desc, order_desc)
-        query = query_module.build_query(table, assigns_with_params)
+      try do
+        Enum.each(tables, fn table ->
+          table_seqnum = if table_seqnums, do: table_seqnums[table], else: nil
+          assigns_with_params = socket.assigns
+            |> Map.put(:since_seqnum, table_seqnum)
+            |> Map.put(:order_by, order_by)
+            |> Map.put(:order_desc, order_desc)
+          query = query_module.build_query(table, assigns_with_params)
 
-        {:ok, _} = Repo.transaction(fn ->
-          query
-          |> Repo.stream()
-          |> Stream.chunk_every(50)
-          |> Enum.each(fn batch ->
-            claims = socket.assigns[:claims] || %{}
-            client_id = socket.assigns[:client_id]
-            sanitized_rows =
-              batch
-              |> Enum.map(fn row -> @row_sanitizer.sanitize_row(row, table, claims, client_id) end)
-              |> Enum.reject(&is_nil/1)
-              |> Enum.map(&serialize_row/1)
+          {:ok, _} = Repo.transaction(fn ->
+            query
+            |> Repo.stream()
+            |> Stream.chunk_every(50)
+            |> Enum.each(fn batch ->
+              claims = socket.assigns[:claims] || %{}
+              client_id = socket.assigns[:client_id]
+              sanitized_rows =
+                batch
+                |> Enum.map(fn row -> @row_sanitizer.sanitize_row(row, table, claims, client_id) end)
+                |> Enum.reject(&is_nil/1)
+                |> Enum.map(&serialize_row/1)
 
-            push(socket, "snapshot_batch", %{
-              stream_id: stream_id,
-              table: table,
-              rows: sanitized_rows
-            })
+              push(socket, "snapshot_batch", %{
+                stream_id: stream_id,
+                table: table,
+                rows: sanitized_rows
+              })
+            end)
           end)
         end)
-      end)
+      rescue
+        e ->
+          Logger.error("[SNAPSHOT:ERROR] stream=#{stream_id} snapshot task crashed: #{inspect(e)}")
+      end
 
       send(channel_pid, {:snapshot_complete, stream_id, socket.topic})
     end)
@@ -909,55 +914,62 @@ defmodule SyncServerWeb.SyncChannel do
         stripped_refreshed: 0
       }
 
-      # 1. Process pending changes
-      {acks, sync_stats} = if skip_push do
-        {[], sync_stats}
-      else
-        acks = process_pending_changes(pending_changes, socket)
+      try do
+        # 1. Process pending changes
+        {acks, sync_stats} = if skip_push do
+          {[], sync_stats}
+        else
+          acks = process_pending_changes(pending_changes, socket)
 
-        success_count = Enum.count(acks, fn a -> a.success end)
-        failed_count = length(acks) - success_count
-        push_by_table = changes_by_table
-          |> Enum.map(fn {table, changes} ->
-            table_acks = Enum.filter(acks, fn a ->
-              Enum.any?(changes, fn c -> c["local_seqnum"] == a.local_seqnum end)
+          success_count = Enum.count(acks, fn a -> a.success end)
+          failed_count = length(acks) - success_count
+          push_by_table = changes_by_table
+            |> Enum.map(fn {table, changes} ->
+              table_acks = Enum.filter(acks, fn a ->
+                Enum.any?(changes, fn c -> c["local_seqnum"] == a.local_seqnum end)
+              end)
+              success = Enum.count(table_acks, fn a -> a.success end)
+              {table, %{total: length(changes), success: success, failed: length(changes) - success}}
             end)
-            success = Enum.count(table_acks, fn a -> a.success end)
-            {table, %{total: length(changes), success: success, failed: length(changes) - success}}
-          end)
-          |> Enum.into(%{})
+            |> Enum.into(%{})
 
-        {acks, %{sync_stats |
-          push_success: success_count,
-          push_failed: failed_count,
-          push_by_table: push_by_table
-        }}
+          {acks, %{sync_stats |
+            push_success: success_count,
+            push_failed: failed_count,
+            push_by_table: push_by_table
+          }}
+        end
+
+        if length(acks) > 0 do
+          push(socket, "change_acks", %{stream_id: stream_id, acks: acks})
+        end
+
+        # 2. Determine tables and stream data
+        {final_seqnums, pull_stats} = if skip_pull do
+          {%{}, %{}}
+        else
+          tables_to_sync = determine_tables_to_sync(tables, socket.assigns)
+
+          stream_sync_data_with_stats(
+            socket, stream_id, tables_to_sync, table_seqnums,
+            force_refresh_tables, stripped_rows
+          )
+        end
+
+        sync_stats = %{sync_stats |
+          pull_total: Enum.sum(Map.values(pull_stats) |> Enum.map(fn s -> s.rows end)),
+          pull_by_table: pull_stats,
+          stripped_refreshed: Enum.sum(Map.values(pull_stats) |> Enum.map(fn s -> s.stripped end))
+        }
+
+        elapsed = System.monotonic_time(:millisecond) - start_time
+        send(channel_pid, {:sync_complete, stream_id, final_seqnums, sync_stats, elapsed})
+      rescue
+        e ->
+          Logger.error("[SYNC:ERROR] stream=#{stream_id} client=#{client_id} sync task crashed: #{inspect(e)}")
+          elapsed = System.monotonic_time(:millisecond) - start_time
+          send(channel_pid, {:sync_complete, stream_id, %{}, sync_stats, elapsed})
       end
-
-      if length(acks) > 0 do
-        push(socket, "sync_acks", %{stream_id: stream_id, acks: acks})
-      end
-
-      # 2. Determine tables and stream data
-      {final_seqnums, pull_stats} = if skip_pull do
-        {%{}, %{}}
-      else
-        tables_to_sync = determine_tables_to_sync(tables, socket.assigns)
-
-        stream_sync_data_with_stats(
-          socket, stream_id, tables_to_sync, table_seqnums,
-          force_refresh_tables, stripped_rows
-        )
-      end
-
-      sync_stats = %{sync_stats |
-        pull_total: Enum.sum(Map.values(pull_stats) |> Enum.map(fn s -> s.rows end)),
-        pull_by_table: pull_stats,
-        stripped_refreshed: Enum.sum(Map.values(pull_stats) |> Enum.map(fn s -> s.stripped end))
-      }
-
-      elapsed = System.monotonic_time(:millisecond) - start_time
-      send(channel_pid, {:sync_complete, stream_id, final_seqnums, sync_stats, elapsed})
     end)
 
     {:reply, {:ok, %{stream_id: stream_id}}, socket}

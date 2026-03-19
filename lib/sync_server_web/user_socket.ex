@@ -10,6 +10,7 @@ defmodule SyncServerWeb.UserSocket do
   channel "sync:zone:*", SyncServerWeb.SyncChannel
   channel "sync:guild:*", SyncServerWeb.SyncChannel
   channel "sync:party:*", SyncServerWeb.SyncChannel
+  channel "sync:room:*", SyncServerWeb.SyncChannel
 
   @impl true
   def connect(%{"token" => token, "client_id" => client_id}, socket, _connect_info) do

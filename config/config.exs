@@ -1,17 +1,34 @@
 import Config
 
-# MMO demo use case — configure your own behaviours here
-config :sync_server,
-  ecto_repos: [SyncServer.Repo],
-  generators: [timestamp_type: :utc_datetime],
-  snapshot_queries: MMO.SnapshotQueries,
-  channel_handler: MMO.Channel,
-  change_handler: MMO.ChangeHandler,
-  broadcast_router: MMO.BroadcastRouter,
-  connection_handler: MMO.ConnectionHandler,
-  custom_queries: nil,
-  schema_manager: MMO.SchemaManager,
-  hash_columns: []
+use_case = System.get_env("USE_CASE", "test")
+
+case use_case do
+  "mmo" ->
+    config :sync_server,
+      ecto_repos: [SyncServer.Repo],
+      generators: [timestamp_type: :utc_datetime],
+      snapshot_queries: MMO.SnapshotQueries,
+      channel_handler: MMO.Channel,
+      change_handler: MMO.ChangeHandler,
+      broadcast_router: MMO.BroadcastRouter,
+      connection_handler: MMO.ConnectionHandler,
+      custom_queries: nil,
+      schema_manager: MMO.SchemaManager,
+      hash_columns: []
+
+  _ ->
+    config :sync_server,
+      ecto_repos: [SyncServer.Repo],
+      generators: [timestamp_type: :utc_datetime],
+      snapshot_queries: Test.SnapshotQueries,
+      channel_handler: Test.Channel,
+      change_handler: Test.ChangeHandler,
+      broadcast_router: Test.BroadcastRouter,
+      connection_handler: Test.ConnectionHandler,
+      custom_queries: nil,
+      schema_manager: Test.SchemaManager,
+      hash_columns: ["last_modified_ms"]
+end
 
 config :sync_server, SyncServerWeb.Endpoint,
   url: [host: "localhost"],

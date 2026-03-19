@@ -17,7 +17,8 @@ defmodule SyncServerWeb.Router do
   end
 
   scope "/api", SyncServerWeb do
-    pipe_through :api
+    pipe_through :api_cors
     get "/health", HealthController, :index
+    delete "/test/items", TestController, :delete_all_items
   end
 end
