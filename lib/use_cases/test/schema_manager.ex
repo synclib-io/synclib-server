@@ -1,7 +1,7 @@
 defmodule Test.SchemaManager do
   @behaviour SyncServer.SchemaManagerBehaviour
 
-  @current_version 1
+  @current_version 2
 
   @impl true
   def current_version, do: @current_version
@@ -39,6 +39,16 @@ defmodule Test.SchemaManager do
         ],
         down: [
           "DROP TABLE IF EXISTS items"
+        ]
+      },
+      %{
+        version: 2,
+        description: "Add row_hash for server-authoritative merkle verification",
+        up: [
+          "ALTER TABLE items ADD COLUMN row_hash TEXT"
+        ],
+        down: [
+          "ALTER TABLE items DROP COLUMN row_hash"
         ]
       }
     ]

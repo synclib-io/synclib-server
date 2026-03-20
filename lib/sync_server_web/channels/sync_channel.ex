@@ -375,7 +375,8 @@ defmodule SyncServerWeb.SyncChannel do
         case @change_handler.apply_change(table, operation, row_id, data, socket.assigns) do
           {:ok, record} ->
             server_seqnum = if record, do: Map.get(record, :seqnum), else: nil
-            {table, operation, row_id, seqnum, data, server_seqnum}
+            row_hash = if record, do: Map.get(record, :row_hash), else: nil
+            {table, operation, row_id, seqnum, data, server_seqnum, row_hash}
 
           {:error, reason} ->
             Repo.rollback({:change_failed, seqnum, reason})
@@ -385,9 +386,10 @@ defmodule SyncServerWeb.SyncChannel do
 
     case result do
       {:ok, applied} ->
-        Enum.each(applied, fn {table, operation, row_id, seqnum, data, server_seqnum} ->
-          push(socket, "ack", %{seqnum: seqnum, success: true, server_seqnum: server_seqnum})
-          broadcast_change_to_others(socket, table, operation, row_id, data)
+        Enum.each(applied, fn {table, operation, row_id, seqnum, data, server_seqnum, row_hash} ->
+          push(socket, "ack", %{seqnum: seqnum, success: true, server_seqnum: server_seqnum, row_hash: row_hash})
+          broadcast_data = if row_hash, do: Map.put(data, "row_hash", row_hash), else: data
+          broadcast_change_to_others(socket, table, operation, row_id, broadcast_data)
         end)
         {:reply, {:ok, %{status: "all_applied"}}, socket}
 
@@ -518,8 +520,12 @@ defmodule SyncServerWeb.SyncChannel do
     client_id = socket.assigns[:client_id]
     block_index = List.first(block_indices, 0)
 
-    rows = Merkle.get_block_rows(table, block_index, socket.assigns, block_size)
-    row_ids = Merkle.get_block_row_ids(table, block_index, socket.assigns, block_size)
+    # Wrap in transaction so both queries see the same snapshot
+    {rows, row_ids} = Repo.transaction(fn ->
+      rows = Merkle.get_block_rows(table, block_index, socket.assigns, block_size)
+      row_ids = Merkle.get_block_row_ids(table, block_index, socket.assigns, block_size)
+      {rows, row_ids}
+    end) |> elem(1)
 
     sanitized_rows =
       rows
@@ -540,8 +546,10 @@ defmodule SyncServerWeb.SyncChannel do
         row_id_str = to_string(row_id)
 
         case @change_handler.apply_change(table, "update", row_id_str, row, socket.assigns) do
-          {:ok, _record} ->
-            broadcast_change_to_others(socket, table, "update", row_id_str, row)
+          {:ok, record} ->
+            row_hash = if record, do: Map.get(record, :row_hash), else: nil
+            broadcast_data = if row_hash, do: Map.put(row, "row_hash", row_hash), else: row
+            broadcast_change_to_others(socket, table, "update", row_id_str, broadcast_data)
             {app + 1, rej, errs}
 
           {:error, reason} ->
@@ -590,8 +598,10 @@ defmodule SyncServerWeb.SyncChannel do
         cond do
           is_nil(server_row) && !is_nil(client_row) ->
             case @change_handler.apply_change(table, "insert", id, client_row, socket.assigns) do
-              {:ok, _} ->
-                broadcast_change_to_others(socket, table, "insert", id, client_row)
+              {:ok, record} ->
+                row_hash = if record, do: Map.get(record, :row_hash), else: nil
+                broadcast_data = if row_hash, do: Map.put(client_row, "row_hash", row_hash), else: client_row
+                broadcast_change_to_others(socket, table, "insert", id, broadcast_data)
                 {[id | cw], sw, app + 1, snt}
               _ ->
                 {cw, sw, app, snt}
@@ -611,8 +621,10 @@ defmodule SyncServerWeb.SyncChannel do
 
             if client_ts > server_ts do
               case @change_handler.apply_change(table, "update", id, client_row, socket.assigns) do
-                {:ok, _} ->
-                  broadcast_change_to_others(socket, table, "update", id, client_row)
+                {:ok, record} ->
+                  row_hash = if record, do: Map.get(record, :row_hash), else: nil
+                  broadcast_data = if row_hash, do: Map.put(client_row, "row_hash", row_hash), else: client_row
+                  broadcast_change_to_others(socket, table, "update", id, broadcast_data)
                   {[id | cw], sw, app + 1, snt}
                 _ ->
                   {cw, sw, app, snt}
@@ -677,8 +689,10 @@ defmodule SyncServerWeb.SyncChannel do
       case @change_handler.apply_change(table, operation, row_id, data, socket.assigns) do
         {:ok, record} ->
           server_seqnum = if record, do: Map.get(record, :seqnum), else: nil
-          broadcast_change_to_others(socket, table, operation, row_id, data)
-          %{local_seqnum: local_seqnum, success: true, server_seqnum: server_seqnum}
+          row_hash = if record, do: Map.get(record, :row_hash), else: nil
+          broadcast_data = if row_hash, do: Map.put(data, "row_hash", row_hash), else: data
+          broadcast_change_to_others(socket, table, operation, row_id, broadcast_data)
+          %{local_seqnum: local_seqnum, success: true, server_seqnum: server_seqnum, row_hash: row_hash}
 
         {:error, reason} ->
           error_msg = case reason do
@@ -786,8 +800,10 @@ defmodule SyncServerWeb.SyncChannel do
     case @change_handler.apply_change(table, operation, row_id, data, socket.assigns) do
       {:ok, record} ->
         server_seqnum = if record, do: Map.get(record, :seqnum), else: nil
-        push(socket, "ack", %{seqnum: seqnum, success: true, server_seqnum: server_seqnum})
-        broadcast_change_to_others(socket, table, operation, row_id, data)
+        row_hash = if record, do: Map.get(record, :row_hash), else: nil
+        push(socket, "ack", %{seqnum: seqnum, success: true, server_seqnum: server_seqnum, row_hash: row_hash})
+        broadcast_data = if row_hash, do: Map.put(data, "row_hash", row_hash), else: data
+        broadcast_change_to_others(socket, table, operation, row_id, broadcast_data)
         {:ok, %{seqnum: seqnum, server_seqnum: server_seqnum}}
 
       {:error, reason} ->

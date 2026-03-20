@@ -30,7 +30,17 @@ This is efficient because seqnums are global — a single number tells you every
 
 ## Merkle Tree Verification
 
-For data integrity, clients periodically compute a merkle tree over their local data and compare it with the server.
+For data integrity, clients periodically build a merkle tree from their locally stored `row_hash` values and compare it with the server.
+
+### Server-Authoritative row_hash
+
+The PostgreSQL trigger (`pg_synclib_hash`) computes `row_hash` at write time. This server-computed hash is the single source of truth. Clients receive `row_hash` values via:
+- Sync data batches (snapshot and incremental)
+- ACK responses (after pushing a change)
+- Broadcast messages (changes from other clients)
+- Merkle repair responses (fetch_blocks, lww_blocks)
+
+Clients store these values locally and use them for merkle comparison — they never compute `row_hash` themselves during normal sync. The `synclib_hash` C library / WASM module is preserved for optional client-side data integrity checks (e.g., detecting local corruption), but is not required for sync.
 
 ### Hash Format
 
@@ -38,14 +48,14 @@ For data integrity, clients periodically compute a merkle tree over their local 
 - **Block hash**: `SHA256(row_hash_1 + row_hash_2 + ... + row_hash_n)` → 64-char hex
 - **Merkle root**: Binary tree of block hashes, odd nodes passed up as-is
 
-### Cross-Platform Consistency
-
-The WASM module (`synclib_hash.wasm`) contains the same C code used by all client platforms (C, TypeScript, Dart). This ensures hashes match exactly across server and all clients.
-
 ### Verification Flow
 
 ```
 Client                              Server
+  │                                    │
+  │  Build merkle tree from stored     │
+  │  row_hash values (no local         │
+  │  computation needed)               │
   │                                    │
   ├─── merkle_verify ────────────────►│  Compare root hashes per table
   │    {table_hashes: {...}}           │
@@ -58,15 +68,15 @@ Client                              Server
   │◄── differing_blocks ──────────────┤  Return which blocks differ
   │                                    │
   ├─── merkle_fetch_blocks ──────────►│  Get server's rows for bad blocks
-  │    {table, blocks: [3, 7]}         │
+  │    {table, blocks: [3, 7]}         │  (rows include row_hash)
   │                                    │
-  │◄── block rows ────────────────────┤  Client repairs its local DB
+  │◄── block rows ────────────────────┤  Client stores rows + row_hash
   │                                    │
 ```
 
-### Fast Path vs Slow Path
+### Server Hash Computation
 
-When `pg_synclib_hash` is installed, each row gets a precomputed `row_hash` column (set by Postgres trigger). The server reads these directly — no WASM computation needed. Without the extension, the server loads full rows and computes hashes via WASM (slower but functional).
+When `pg_synclib_hash` is installed, each row gets a precomputed `row_hash` column (set by Postgres BEFORE trigger). The server reads these directly for merkle comparison — no WASM computation needed. Without the extension, the server loads full rows and computes hashes via WASM (slower but functional).
 
 ## Channel Scoping
 
@@ -110,6 +120,6 @@ For a table to participate in sync, it needs:
 | `deleted_at` | `TIMESTAMP` | Soft delete (NULL = active) |
 | `last_modified_ms` | `BIGINT` | Client-assigned modification time |
 | `document` | `JSONB` | Optional flexible data field |
-| `row_hash` | `TEXT` | Optional, set by pg_synclib_hash trigger |
+| `row_hash` | `TEXT` | Server-authoritative hash, set by pg_synclib_hash trigger. Clients store this value — never compute it locally for sync. |
 
 `SetupTriggers` auto-discovers tables that have both `id` and `deleted_at` columns and creates the seqnum trigger for them.

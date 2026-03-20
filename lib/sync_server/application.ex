@@ -16,23 +16,14 @@ defmodule SyncServer.Application do
     opts = [strategy: :one_for_one, name: SyncServer.Supervisor]
     result = Supervisor.start_link(children, opts)
 
-    # Set up sync triggers after Repo is running (idempotent)
+    # Attach per-table triggers after Repo is up (idempotent)
     case result do
-      {:ok, _pid} -> setup_triggers()
+      {:ok, _pid} ->
+        SyncServer.SetupTriggers.run()
       _ -> :ok
     end
 
     result
-  end
-
-  defp setup_triggers do
-    Task.start(fn ->
-      try do
-        SyncServer.SetupTriggers.run()
-      rescue
-        e -> Logger.warning("[Application] Trigger setup failed: #{Exception.message(e)}")
-      end
-    end)
   end
 
   @impl true

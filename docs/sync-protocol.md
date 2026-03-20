@@ -117,10 +117,12 @@ Push a single change.
 
 **Server pushes:** `ack` event
 ```json
-{"seqnum": 1, "success": true, "server_seqnum": 44}
+{"seqnum": 1, "success": true, "server_seqnum": 44, "row_hash": "a1b2c3..."}
 ```
 
-Server also broadcasts `change` to other clients on the appropriate topic.
+The `row_hash` is the server-computed hash (set by Postgres trigger). Clients should store this value locally — it is the single source of truth for merkle comparison.
+
+Server also broadcasts `change` to other clients on the appropriate topic. Broadcast data includes `row_hash` so all clients receive the server-computed value.
 
 ### `sync` (client → server)
 

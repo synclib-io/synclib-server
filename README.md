@@ -56,12 +56,18 @@ mix deps.get
 
 # Create and migrate the database
 mix ecto.setup
+```
 
-# Start the server
-mix phx.server
+### Run
+
+```bash
+# Migrate and start (use this every time)
+mix ecto.migrate && mix phx.server
 ```
 
 The server starts on `http://localhost:4444` by default.
+
+Migrations are idempotent — `mix ecto.migrate` skips already-run ones. Per-table triggers (seqnum + row_hash) are attached automatically at startup by `SetupTriggers`.
 
 ### Connect
 
@@ -82,6 +88,18 @@ Then join a channel:
 // Join user channel
 {"topic": "sync:user:user-123", "event": "phx_join", "payload": {"client_id": "my-client"}}
 ```
+
+## Migrations
+
+`priv/repo/migrations/` contains only core sync infrastructure:
+
+```
+priv/repo/migrations/
+├── 20260310000000_setup_sync_infrastructure.exs   # Seqnum sequence, trigger function, pg_synclib_hash, row_hash columns
+└── 20260319000000_create_test_tables.exs          # Test suite tables
+```
+
+Use-case table migrations go here too, but the core migration must run first (it creates the seqnum function that triggers depend on). See [docs/example_migration_mmo.exs](docs/example_migration_mmo.exs) for an example of a use-case migration that creates synced tables with the required columns (`id`, `seqnum`, `deleted_at`).
 
 ## Project Structure
 

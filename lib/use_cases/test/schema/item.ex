@@ -1,15 +1,10 @@
 defmodule Test.Schema.Item do
-  use Ecto.Schema
-  import Ecto.Changeset
-
-  @primary_key {:id, :string, autogenerate: false}
+  use SyncServer.SyncSchema
 
   schema "items" do
+    sync_fields()
     field :document, :map
     field :room_id, :string
-    field :last_modified_ms, :integer
-    field :seqnum, :integer
-    field :deleted_at, :utc_datetime
   end
 
   def changeset(item, attrs) do

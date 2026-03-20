@@ -121,9 +121,9 @@ defmodule SyncServer.Merkle do
 
   defp fetch_precomputed_hashes(base_query) do
     query = from(q in base_query,
-      where: is_nil(q.deleted_at) and not is_nil(fragment("row_hash")),
+      where: is_nil(q.deleted_at),
       order_by: q.id,
-      select: fragment("row_hash")
+      select: fragment("COALESCE(row_hash, '')")
     )
 
     hashes = Repo.all(query)
