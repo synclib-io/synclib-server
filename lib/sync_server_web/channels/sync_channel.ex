@@ -153,6 +153,17 @@ defmodule SyncServerWeb.SyncChannel do
     {:noreply, socket}
   end
 
+  def handle_info({:sync_error, stream_id, error, elapsed_ms}, socket) do
+    Logger.error("[SYNC:FAILED] stream=#{stream_id} elapsed=#{elapsed_ms}ms error=#{error}")
+
+    push(socket, "sync_error", %{
+      stream_id: stream_id,
+      channel_id: socket.topic,
+      error: error
+    })
+    {:noreply, socket}
+  end
+
   def handle_info({:sync_complete, stream_id, final_seqnums, sync_stats, elapsed_ms}, socket) do
     Logger.info("[SYNC:COMPLETE] stream=#{stream_id} client=#{sync_stats.client_id} " <>
       "push=#{sync_stats.push_success}/#{sync_stats.push_total} " <>
@@ -795,7 +806,7 @@ defmodule SyncServerWeb.SyncChannel do
     query_module = Application.get_env(:sync_server, :snapshot_queries)
     channel_pid = self()
 
-    Task.start(fn ->
+    Task.start_link(fn ->
       try do
         Enum.each(tables, fn table ->
           table_seqnum = if table_seqnums, do: table_seqnums[table], else: nil
@@ -919,7 +930,7 @@ defmodule SyncServerWeb.SyncChannel do
     channel_pid = self()
     stream_id = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
 
-    Task.start(fn ->
+    Task.start_link(fn ->
       sync_stats = %{
         stream_id: stream_id,
         client_id: client_id,
@@ -987,7 +998,7 @@ defmodule SyncServerWeb.SyncChannel do
         e ->
           Logger.error("[SYNC:ERROR] stream=#{stream_id} client=#{client_id} sync task crashed: #{inspect(e)}")
           elapsed = System.monotonic_time(:millisecond) - start_time
-          send(channel_pid, {:sync_complete, stream_id, %{}, sync_stats, elapsed})
+          send(channel_pid, {:sync_error, stream_id, inspect(e), elapsed})
       end
     end)
 
