@@ -42,7 +42,16 @@ defmodule SyncServer.SetupTriggers do
       CREATE OR REPLACE FUNCTION update_seqnum_on_change()
       RETURNS TRIGGER AS $$
       BEGIN
-        NEW.seqnum = nextval('global_seqnum_seq');
+        IF TG_OP = 'INSERT' THEN
+          NEW.seqnum = nextval('global_seqnum_seq');
+        ELSIF TG_OP = 'UPDATE' THEN
+          NEW.seqnum = OLD.seqnum;
+          IF NEW IS NOT DISTINCT FROM OLD THEN
+            RETURN NEW;
+          ELSE
+            NEW.seqnum = nextval('global_seqnum_seq');
+          END IF;
+        END IF;
         RETURN NEW;
       END;
       $$ LANGUAGE plpgsql

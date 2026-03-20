@@ -1,7 +1,7 @@
 import Config
 
 config :sync_server, SyncServer.Repo,
-  username: "postgres",
+  username: "phil",
   password: "postgres",
   hostname: "localhost",
   database: "synclib_test#{System.get_env("MIX_TEST_PARTITION")}",

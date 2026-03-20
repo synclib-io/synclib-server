@@ -66,7 +66,7 @@ defmodule SyncServerWeb.SyncChannel do
         stale_tables = case params["table_seqnums"] do
           nil -> []
           client_seqnums when is_map(client_seqnums) ->
-            check_stale_tables(client_seqnums)
+            check_stale_tables(client_seqnums, socket.assigns)
           _ -> []
         end
 
@@ -84,8 +84,13 @@ defmodule SyncServerWeb.SyncChannel do
     end
   end
 
-  defp check_stale_tables(client_seqnums) when is_map(client_seqnums) do
+  defp check_stale_tables(client_seqnums, assigns) when is_map(client_seqnums) do
+    allowed_tables = get_tables_for_channel(assigns)
+
     client_seqnums
+    |> Enum.filter(fn {table, _} ->
+      allowed_tables == [] or table in allowed_tables
+    end)
     |> Enum.map(fn {table, client_seqnum} ->
       case get_table_max_seqnum(table) do
         {:ok, server_seqnum} when server_seqnum > client_seqnum ->
@@ -177,11 +182,15 @@ defmodule SyncServerWeb.SyncChannel do
   # ============================================================================
 
   def handle_in("hello", params, socket) do
-    %{
-      "client_id" => client_id,
-      "last_seqnum" => last_seqnum,
-      "schema_version" => schema_version
-    } = params
+    client_id = params["client_id"]
+    last_seqnum = params["last_seqnum"]
+    schema_version = params["schema_version"]
+
+    unless client_id && last_seqnum && schema_version do
+      missing = ["client_id", "last_seqnum", "schema_version"]
+        |> Enum.reject(&Map.has_key?(params, &1))
+      {:reply, {:error, %{reason: "missing_keys", keys: missing}}, socket}
+    else
 
     Logger.info("Hello from #{client_id}, schema v#{schema_version}, last_seqnum: #{last_seqnum}")
 
@@ -211,6 +220,7 @@ defmodule SyncServerWeb.SyncChannel do
       end
 
     {:reply, {:ok, response}, socket}
+    end
   end
 
   # ============================================================================
@@ -304,15 +314,24 @@ defmodule SyncServerWeb.SyncChannel do
   def handle_in("fetch_row", %{"table" => table, "row_id" => row_id}, socket) do
     schema = get_schema_for_table(table)
 
-    case Repo.get(schema, row_id) do
-      nil ->
-        {:reply, {:error, %{reason: "not_found", table: table, row_id: row_id}}, socket}
+    if is_nil(schema) do
+      {:reply, {:error, %{reason: "unknown_table", table: table}}, socket}
+    else
+      case Repo.get(schema, row_id) do
+        nil ->
+          {:reply, {:error, %{reason: "not_found", table: table, row_id: row_id}}, socket}
 
-      record ->
-        claims = socket.assigns[:claims] || %{}
-        client_id = socket.assigns[:client_id]
-        sanitized_record = @row_sanitizer.sanitize_row(record, table, claims, client_id)
-        {:reply, {:ok, %{row: serialize_row(sanitized_record)}}, socket}
+        record ->
+          room_id = socket.assigns[:room_id]
+          if room_id && Map.has_key?(record, :room_id) && record.room_id != room_id do
+            {:reply, {:error, %{reason: "not_found", table: table, row_id: row_id}}, socket}
+          else
+            claims = socket.assigns[:claims] || %{}
+            client_id = socket.assigns[:client_id]
+            sanitized_record = @row_sanitizer.sanitize_row(record, table, claims, client_id)
+            {:reply, {:ok, %{row: serialize_row(sanitized_record)}}, socket}
+          end
+      end
     end
   rescue
     e in Postgrex.Error ->
@@ -336,23 +355,38 @@ defmodule SyncServerWeb.SyncChannel do
   # ============================================================================
 
   def handle_in("changes_batch", %{"changes" => changes}, socket) do
-    results = Enum.map(changes, fn change ->
-      handle_change(change, socket)
+    result = Repo.transaction(fn ->
+      Enum.map(changes, fn change ->
+        %{"table" => table, "operation" => operation, "row_id" => row_id,
+          "seqnum" => seqnum} = change
+        data = Map.get(change, "data", %{})
+
+        case @change_handler.apply_change(table, operation, row_id, data, socket.assigns) do
+          {:ok, record} ->
+            server_seqnum = if record, do: Map.get(record, :seqnum), else: nil
+            {table, operation, row_id, seqnum, data, server_seqnum}
+
+          {:error, reason} ->
+            Repo.rollback({:change_failed, seqnum, reason})
+        end
+      end)
     end)
 
-    all_ok = Enum.all?(results, fn {status, _} -> status == :ok end)
+    case result do
+      {:ok, applied} ->
+        Enum.each(applied, fn {table, operation, row_id, seqnum, data, server_seqnum} ->
+          push(socket, "ack", %{seqnum: seqnum, success: true, server_seqnum: server_seqnum})
+          broadcast_change_to_others(socket, table, operation, row_id, data)
+        end)
+        {:reply, {:ok, %{status: "all_applied"}}, socket}
 
-    if all_ok do
-      {:reply, {:ok, %{status: "all_applied"}}, socket}
-    else
-      serializable_results = Enum.map(results, fn
-        {:ok, data} -> %{status: "ok", data: data}
-        {:error, reason} when is_binary(reason) -> %{status: "error", error: reason}
-        {:error, %Ecto.Changeset{} = changeset} -> %{status: "error", error: "Validation failed", errors: translate_errors(changeset)}
-        {:error, reason} -> %{status: "error", error: inspect(reason)}
-      end)
-
-      {:reply, {:error, %{status: "some_failed", results: serializable_results}}, socket}
+      {:error, {:change_failed, failed_seqnum, reason}} ->
+        error_msg = case reason do
+          %Ecto.Changeset{} = cs -> "Validation failed: #{inspect(translate_errors(cs))}"
+          msg when is_binary(msg) -> msg
+          _ -> inspect(reason)
+        end
+        {:reply, {:error, %{status: "batch_failed", failed_seqnum: failed_seqnum, error: error_msg}}, socket}
     end
   end
 
@@ -504,28 +538,12 @@ defmodule SyncServerWeb.SyncChannel do
         end
       end)
 
-    server_row_ids = Merkle.get_block_row_ids(table, block_index, socket.assigns, block_size)
-    client_id_set = MapSet.new(Enum.map(client_row_ids, &to_string/1))
-
-    deleted =
-      server_row_ids
-      |> Enum.reject(&MapSet.member?(client_id_set, to_string(&1)))
-      |> Enum.reduce(0, fn row_id, count ->
-        case @change_handler.apply_change(table, "delete", to_string(row_id), %{}, socket.assigns) do
-          {:ok, _} ->
-            broadcast_change_to_others(socket, table, "delete", to_string(row_id), %{})
-            count + 1
-          _ ->
-            count
-        end
-      end)
-
     {:reply, {:ok, %{
       table: table,
       block_index: block_index,
       applied: applied,
       rejected: rejected,
-      deleted: deleted,
+      deleted: 0,
       errors: Enum.reverse(errors)
     }}, socket}
   end
@@ -721,6 +739,7 @@ defmodule SyncServerWeb.SyncChannel do
 
   defp fetch_and_push_stripped_rows(socket, stream_id, table, row_ids, claims, client_id) do
     schema = get_schema_for_table(table)
+    if is_nil(schema), do: throw({:unknown_table, table})
 
     rows = Enum.flat_map(row_ids, fn row_id ->
       case Repo.get(schema, row_id) do

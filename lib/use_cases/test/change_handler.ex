@@ -22,7 +22,7 @@ defmodule Test.ChangeHandler do
 
   @impl true
   def get_schema_for_table(table) do
-    Map.get(@schema_map, table, Item)
+    Map.get(@schema_map, table)
   end
 
   # Insert
@@ -31,11 +31,21 @@ defmodule Test.ChangeHandler do
       |> Map.put("id", row_id)
       |> ensure_timestamps()
 
-    changeset = schema.changeset(struct(schema), data)
+    case Repo.get(schema, row_id) do
+      nil ->
+        changeset = schema.changeset(struct(schema), data)
+        Repo.insert(changeset)
 
-    case Repo.insert(changeset, on_conflict: :replace_all, conflict_target: :id) do
-      {:ok, record} -> {:ok, record}
-      {:error, changeset} -> {:error, changeset}
+      existing ->
+        incoming_ts = data["last_modified_ms"] || 0
+        existing_ts = existing.last_modified_ms || 0
+
+        if incoming_ts >= existing_ts do
+          changeset = schema.changeset(existing, data)
+          Repo.update(changeset)
+        else
+          {:ok, existing}
+        end
     end
   end
 
@@ -48,11 +58,18 @@ defmodule Test.ChangeHandler do
           |> ensure_timestamps()
 
         changeset = schema.changeset(struct(schema), data)
-        Repo.insert(changeset, on_conflict: :replace_all, conflict_target: :id)
+        Repo.insert(changeset)
 
       record ->
-        changeset = schema.changeset(record, data)
-        Repo.update(changeset)
+        incoming_ts = data["last_modified_ms"] || 0
+        existing_ts = record.last_modified_ms || 0
+
+        if incoming_ts >= existing_ts do
+          changeset = schema.changeset(record, data)
+          Repo.update(changeset)
+        else
+          {:ok, record}
+        end
     end
   end
 
