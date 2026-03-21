@@ -5,7 +5,7 @@ Real-time bidirectional data sync server built on Phoenix channels and PostgreSQ
 Clients maintain a local SQLite database that stays in sync with the server's Postgres. The sync system provides:
 
 - **Seqnum-based incremental sync** — Global monotonic sequence numbers on every row. Clients track their last-seen seqnum per table and pull only newer rows.
-- **Merkle tree verification** — SHA256-based integrity checking. Clients compare merkle roots, drill into differing blocks, and repair discrepancies.
+- **Merkle tree verification** — SHA256-based integrity checking using server-authoritative row hashes. Clients store the server-computed `row_hash` and compare merkle roots to detect drift, drilling into differing blocks to repair only the rows that changed. For applications that also need correctness verification, clients can use `synclib_hash` directly to compute and compare hashes locally.
 - **Scoped broadcasting** — Changes broadcast to the correct channel (user, guild, zone, world, party) so clients only receive relevant updates.
 - **Client schema management** — Server pushes SQLite DDL migrations to clients so their local database stays in sync with schema changes.
 
