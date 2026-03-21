@@ -17,11 +17,11 @@ Client (SQLite)                    Server (Postgres)
 │ Local DB    │ ◄── WebSocket ──► │ Phoenix Channel  │
 │ (SQLite)    │     (sync proto)  │                  │
 │             │                   │ ┌──────────────┐ │
-│ seqnum track│ ◄─── pull ──────  │ │ Seqnum       │ │
+│ local writes│ ──── push ─────►  │ │ Seqnum       │ │
 │             │                   │ │ Triggers     │ │
-│ merkle tree │ ◄── verify ────►  │ │              │ │
+│ seqnum track│ ◄─── pull ──────  │ │              │ │
 │             │                   │ │ row_hash     │ │
-│ local writes│ ──── push ─────►  │ │ Triggers     │ │
+│ merkle tree │ ◄── verify ────►  │ │ Triggers     │ │
 └─────────────┘                   │ └──────────────┘ │
                                   │                  │
                                   │ ┌──────────────┐ │
@@ -31,14 +31,13 @@ Client (SQLite)                    Server (Postgres)
                                   └──────────────────┘
 ```
 
-### Sync Flow
+### Sync Flow (Unified Sync)
 
 1. **Client joins** a channel (e.g., `sync:user:abc123`)
 2. **Schema check** — server sends migrations if client schema is outdated
-3. **Snapshot** — client requests initial data per table, streamed in batches
-4. **Incremental sync** — client sends `table_seqnums`, server returns only newer rows
-5. **Changes** — client pushes local changes, server applies and broadcasts to others
-6. **Merkle verify** — periodic integrity check compares hashes, repairs mismatches
+3. **Push** — client pushes local changes, server applies and broadcasts to others
+4. **Pull** — client sends `table_seqnums`, server streams only newer rows
+5. **Merkle verify** — integrity check compares hashes, repairs mismatches
 
 ## Getting Started
 
