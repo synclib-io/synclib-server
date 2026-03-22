@@ -27,7 +27,7 @@ case use_case do
       connection_handler: Test.ConnectionHandler,
       custom_queries: nil,
       schema_manager: Test.SchemaManager,
-      hash_columns: ["last_modified_ms"]
+      hash_columns: []
 end
 
 config :sync_server, SyncServerWeb.Endpoint,

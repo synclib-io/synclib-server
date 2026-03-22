@@ -25,7 +25,11 @@ defmodule SyncServerWeb.Router do
     scope "/api", SyncServerWeb do
       pipe_through :api_cors
       options "/test/items", TestController, :options
+      options "/test/items/:id", TestController, :options
       delete "/test/items", TestController, :delete_all_items
+      get "/test/items/:id", TestController, :get_item
+      put "/test/items/:id", TestController, :update_item
+      delete "/test/items/:id", TestController, :delete_item
     end
   end
 end
