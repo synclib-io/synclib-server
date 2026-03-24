@@ -458,12 +458,16 @@ defmodule SyncServerWeb.SyncChannel do
     alias SyncServer.SchemaIntrospection
     block_size = params["block_size"] || 100
 
+    total_t0 = System.monotonic_time(:millisecond)
     Logger.info("[MERKLE:VERIFY] Checking #{map_size(table_hashes)} tables")
 
     mismatches =
       table_hashes
       |> Enum.map(fn {table, client_info} ->
+        t0 = System.monotonic_time(:millisecond)
         server_info = Merkle.compute_root(table, socket.assigns, block_size)
+        elapsed = System.monotonic_time(:millisecond) - t0
+        Logger.info("[MERKLE:VERIFY] #{table}: compute_root took #{elapsed}ms (#{server_info.row_count} rows)")
         client_hash = if is_map(client_info), do: client_info["root_hash"], else: client_info
 
         if server_info.root_hash != client_hash do
@@ -474,7 +478,9 @@ defmodule SyncServerWeb.SyncChannel do
             _ -> []
           end
 
+          t1 = System.monotonic_time(:millisecond)
           scoped_row_ids = Merkle.get_scoped_row_ids(table, socket.assigns)
+          Logger.info("[MERKLE:VERIFY] #{table}: get_scoped_row_ids took #{System.monotonic_time(:millisecond) - t1}ms (#{length(scoped_row_ids)} ids)")
 
           %{
             table: table,
@@ -490,6 +496,9 @@ defmodule SyncServerWeb.SyncChannel do
         end
       end)
       |> Enum.reject(&is_nil/1)
+
+    total_elapsed = System.monotonic_time(:millisecond) - total_t0
+    Logger.info("[MERKLE:VERIFY] Total: #{total_elapsed}ms, #{length(mismatches)} mismatches")
 
     response = if length(mismatches) == 0 do
       %{status: "ok", mismatches: []}
@@ -527,9 +536,26 @@ defmodule SyncServerWeb.SyncChannel do
       {rows, row_ids}
     end) |> elem(1)
 
+    # Sanitize rows based on claims.
+    # Merkle.get_block_rows returns string-keyed maps (from row_to_map),
+    # but sanitize_row pattern-matches on atom keys. Convert before sanitizing,
+    # then back to string keys for the JSON response.
     sanitized_rows =
       rows
-      |> Enum.map(fn row -> @row_sanitizer.sanitize_row(row, table, claims, client_id) end)
+      |> Enum.map(fn row ->
+        atom_row = Map.new(row, fn
+          {k, v} when is_binary(k) -> {String.to_existing_atom(k), v}
+          {k, v} -> {k, v}
+        end)
+        case @row_sanitizer.sanitize_row(atom_row, table, claims, client_id) do
+          nil -> nil
+          sanitized ->
+            Map.new(sanitized, fn
+              {k, v} when is_atom(k) -> {Atom.to_string(k), v}
+              {k, v} -> {k, v}
+            end)
+        end
+      end)
       |> Enum.reject(&is_nil/1)
 
     {:reply, {:ok, %{table: table, block: block_index, rows: sanitized_rows, row_ids: row_ids}}, socket}

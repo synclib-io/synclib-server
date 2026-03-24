@@ -43,11 +43,16 @@ defmodule SyncServer.Merkle do
     base_assigns = Map.delete(assigns, :since_seqnum)
     base_query = query_module.build_query(table_name, base_assigns)
 
+    # Use precomputed row_hash column (set by pg_synclib_hash trigger).
+    # In server-authoritative mode this is the only correct path — the slow
+    # path re-computes hashes from row data which is wasteful and can diverge.
     case query_precomputed_hashes(base_query, table_name) do
       {:ok, row_hashes} ->
         compute_root_from_precomputed(row_hashes, block_size)
 
       :fallback ->
+        Logger.warning("[MERKLE] #{table_name}: row_hash fast path failed, falling back to slow computation. " <>
+          "Ensure the row_hash column exists and the pg_synclib_hash trigger is installed.")
         compute_root_from_rows(base_query, block_size, hash_columns)
     end
   end
@@ -116,25 +121,26 @@ defmodule SyncServer.Merkle do
         :fallback
     end
   rescue
-    _ -> :fallback
+    e ->
+      Logger.error("[MERKLE] query_precomputed_hashes failed: #{inspect(e)}")
+      :fallback
   end
 
   defp fetch_precomputed_hashes(base_query) do
+    # Use qualified reference (q.row_hash) to avoid ambiguity when the
+    # base_query includes JOINs (e.g. subcollection tables joining parents).
     query = from(q in base_query,
       where: is_nil(q.deleted_at),
       order_by: q.id,
-      select: fragment("COALESCE(row_hash, '')")
+      select: fragment("COALESCE(?, '')", q.row_hash)
     )
 
     hashes = Repo.all(query)
-
-    if length(hashes) > 0 do
-      {:ok, hashes}
-    else
-      :fallback
-    end
+    {:ok, hashes}
   rescue
-    _ -> :fallback
+    e ->
+      Logger.error("[MERKLE] fetch_precomputed_hashes failed: #{inspect(e)}")
+      :fallback
   end
 
   @doc """
