@@ -830,7 +830,7 @@ defmodule SyncServerWeb.SyncChannel do
         push(socket, "ack", %{seqnum: seqnum, success: true, server_seqnum: server_seqnum, row_hash: row_hash})
         broadcast_data = if row_hash, do: Map.put(data, "row_hash", row_hash), else: data
         broadcast_change_to_others(socket, table, operation, row_id, broadcast_data)
-        {:ok, %{seqnum: seqnum, server_seqnum: server_seqnum}}
+        {:noreply, socket}
 
       {:error, reason} ->
         error_msg = case reason do
@@ -839,7 +839,7 @@ defmodule SyncServerWeb.SyncChannel do
           _ -> inspect(reason)
         end
         push(socket, "ack", %{seqnum: seqnum, success: false, error: error_msg})
-        {:error, reason}
+        {:noreply, socket}
     end
   end
 
